@@ -12,16 +12,19 @@ create table if not exists public.customers (
   contact text not null,
   phone text,
   wechat text,
-  whatsapp text,
+  line_lark text,
   email text,
   region text,
   industry text,
   tiktok text,
+  ad_account_name text,
   ad_account_id text,
   business_center_id text,
   rebate_rate text,
+  cooperation_start date,
+  business_license_url text,
+  dbd_url text,
   source text not null default 'TikTok',
-  intent text not null default '中' check (intent in ('高', '中', '低')),
   status text not null default '新客户' check (
     status in (
       '新客户',
@@ -37,12 +40,54 @@ create table if not exists public.customers (
   ),
   owner_id uuid references public.profiles(id) on delete set null,
   owner_name text,
-  next_follow_up date,
   notes text,
   created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.customers
+  add column if not exists line_lark text,
+  add column if not exists ad_account_name text,
+  add column if not exists cooperation_start date,
+  add column if not exists business_license_url text,
+  add column if not exists dbd_url text;
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'customers'
+      and column_name = 'whatsapp'
+  ) then
+    update public.customers
+    set line_lark = coalesce(line_lark, whatsapp);
+
+    alter table public.customers drop column whatsapp;
+  end if;
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'customers'
+      and column_name = 'intent'
+  ) then
+    alter table public.customers drop column intent;
+  end if;
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'customers'
+      and column_name = 'next_follow_up'
+  ) then
+    alter table public.customers drop column next_follow_up;
+  end if;
+end $$;
 
 create table if not exists public.follow_ups (
   id uuid primary key default gen_random_uuid(),
@@ -101,6 +146,10 @@ for each row execute function public.handle_new_user();
 alter table public.profiles enable row level security;
 alter table public.customers enable row level security;
 alter table public.follow_ups enable row level security;
+
+insert into storage.buckets (id, name, public)
+values ('customer-documents', 'customer-documents', true)
+on conflict (id) do update set public = excluded.public;
 
 create or replace function public.is_admin_or_manager()
 returns boolean
@@ -196,4 +245,32 @@ with check (
         or public.is_admin_or_manager()
       )
   )
+);
+
+drop policy if exists "customer_documents_select_authenticated" on storage.objects;
+create policy "customer_documents_select_authenticated"
+on storage.objects for select
+to authenticated
+using (bucket_id = 'customer-documents');
+
+drop policy if exists "customer_documents_insert_own_folder" on storage.objects;
+create policy "customer_documents_insert_own_folder"
+on storage.objects for insert
+to authenticated
+with check (
+  bucket_id = 'customer-documents'
+  and (storage.foldername(name))[1] = auth.uid()::text
+);
+
+drop policy if exists "customer_documents_update_own_folder" on storage.objects;
+create policy "customer_documents_update_own_folder"
+on storage.objects for update
+to authenticated
+using (
+  bucket_id = 'customer-documents'
+  and (storage.foldername(name))[1] = auth.uid()::text
+)
+with check (
+  bucket_id = 'customer-documents'
+  and (storage.foldername(name))[1] = auth.uid()::text
 );

@@ -13,27 +13,27 @@ type CustomerStatus =
   | "暂停"
   | "流失";
 
-type CustomerIntent = "高" | "中" | "低";
-
 type Customer = {
   id: string;
   company: string;
   contact: string;
   phone: string;
   wechat: string;
-  whatsapp: string;
+  lineLark: string;
   email: string;
   region: string;
   industry: string;
   tiktok: string;
+  adAccountName: string;
   adAccountId: string;
   businessCenterId: string;
   rebateRate: string;
+  cooperationStart: string;
+  businessLicenseUrl: string;
+  dbdUrl: string;
   source: string;
-  intent: CustomerIntent;
   status: CustomerStatus;
   ownerName: string;
-  nextFollowUp: string;
   notes: string;
   createdAt: string;
 };
@@ -53,19 +53,21 @@ type SupabaseCustomerRow = {
   contact: string;
   phone: string | null;
   wechat: string | null;
-  whatsapp: string | null;
+  line_lark: string | null;
   email: string | null;
   region: string | null;
   industry: string | null;
   tiktok: string | null;
+  ad_account_name: string | null;
   ad_account_id: string | null;
   business_center_id: string | null;
   rebate_rate: string | null;
+  cooperation_start: string | null;
+  business_license_url: string | null;
+  dbd_url: string | null;
   source: string;
-  intent: CustomerIntent;
   status: CustomerStatus;
   owner_name: string | null;
-  next_follow_up: string | null;
   notes: string | null;
   created_at: string;
 };
@@ -90,19 +92,21 @@ const emptyForm: CustomerForm = {
   contact: "",
   phone: "",
   wechat: "",
-  whatsapp: "",
+  lineLark: "",
   email: "",
   region: "",
   industry: "",
   tiktok: "",
+  adAccountName: "",
   adAccountId: "",
   businessCenterId: "",
   rebateRate: "",
+  cooperationStart: "",
+  businessLicenseUrl: "",
+  dbdUrl: "",
   source: "TikTok",
-  intent: "中",
   status: "新客户",
   ownerName: "",
-  nextFollowUp: "",
   notes: "",
 };
 
@@ -117,19 +121,21 @@ function mapCustomer(row: SupabaseCustomerRow): Customer {
     contact: row.contact,
     phone: row.phone ?? "",
     wechat: row.wechat ?? "",
-    whatsapp: row.whatsapp ?? "",
+    lineLark: row.line_lark ?? "",
     email: row.email ?? "",
     region: row.region ?? "",
     industry: row.industry ?? "",
     tiktok: row.tiktok ?? "",
+    adAccountName: row.ad_account_name ?? "",
     adAccountId: row.ad_account_id ?? "",
     businessCenterId: row.business_center_id ?? "",
     rebateRate: row.rebate_rate ?? "",
+    cooperationStart: row.cooperation_start ?? "",
+    businessLicenseUrl: row.business_license_url ?? "",
+    dbdUrl: row.dbd_url ?? "",
     source: row.source,
-    intent: row.intent,
     status: row.status,
     ownerName: row.owner_name ?? "",
-    nextFollowUp: row.next_follow_up ?? "",
     notes: row.notes ?? "",
     createdAt: formatDate(row.created_at),
   };
@@ -141,20 +147,22 @@ function toCustomerPayload(form: CustomerForm, session: AuthSession) {
     contact: form.contact.trim(),
     phone: form.phone || null,
     wechat: form.wechat || null,
-    whatsapp: form.whatsapp || null,
+    line_lark: form.lineLark || null,
     email: form.email || null,
     region: form.region || null,
     industry: form.industry || null,
     tiktok: form.tiktok || null,
+    ad_account_name: form.adAccountName || null,
     ad_account_id: form.adAccountId || null,
     business_center_id: form.businessCenterId || null,
     rebate_rate: form.rebateRate || null,
+    cooperation_start: form.cooperationStart || null,
+    business_license_url: form.businessLicenseUrl || null,
+    dbd_url: form.dbdUrl || null,
     source: form.source,
-    intent: form.intent,
     status: form.status,
     owner_id: session.userId,
     owner_name: form.ownerName || session.fullName || session.email,
-    next_follow_up: form.nextFollowUp || null,
     notes: form.notes || null,
     created_by: session.userId,
   };
@@ -206,6 +214,42 @@ async function supabaseRequest<T>(
   }
 
   return (await response.json()) as T;
+}
+
+async function uploadCustomerDocument(
+  file: File,
+  kind: "license" | "dbd",
+  session: AuthSession,
+) {
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error("缺少 Supabase 环境配置。");
+  }
+
+  const extension = file.name.split(".").pop()?.toLowerCase() || "file";
+  const safeName = `${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}.${extension}`;
+  const path = `${session.userId}/${kind}/${safeName}`;
+  const response = await fetch(
+    `${supabaseUrl}/storage/v1/object/customer-documents/${path}`,
+    {
+      body: file,
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${session.accessToken}`,
+        "Content-Type": file.type || "application/octet-stream",
+        "x-upsert": "true",
+      },
+      method: "POST",
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || "文件上传失败。");
+  }
+
+  return `${supabaseUrl}/storage/v1/object/public/customer-documents/${path}`;
 }
 
 async function signIn(email: string, password: string) {
@@ -324,11 +368,10 @@ export default function Home() {
   );
   const [ownerFilter, setOwnerFilter] = useState("全部");
   const [sourceFilter, setSourceFilter] = useState("全部");
-  const [intentFilter, setIntentFilter] = useState<CustomerIntent | "全部">(
-    "全部",
-  );
   const [regionFilter, setRegionFilter] = useState("全部");
   const [industryFilter, setIndustryFilter] = useState("全部");
+  const [licenseFile, setLicenseFile] = useState<File | null>(null);
+  const [dbdFile, setDbdFile] = useState<File | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [customerModalOpen, setCustomerModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -398,13 +441,15 @@ export default function Home() {
         customer.contact,
         customer.phone,
         customer.wechat,
-        customer.whatsapp,
+        customer.lineLark,
         customer.email,
         customer.region,
         customer.industry,
+        customer.adAccountName,
         customer.adAccountId,
         customer.businessCenterId,
         customer.rebateRate,
+        customer.cooperationStart,
         customer.ownerName,
       ]
         .join(" ")
@@ -417,8 +462,6 @@ export default function Home() {
         ownerFilter === "全部" || customer.ownerName === ownerFilter;
       const matchesSource =
         sourceFilter === "全部" || customer.source === sourceFilter;
-      const matchesIntent =
-        intentFilter === "全部" || customer.intent === intentFilter;
       const matchesRegion =
         regionFilter === "全部" || customer.region === regionFilter;
       const matchesIndustry =
@@ -429,7 +472,6 @@ export default function Home() {
         matchesStatus &&
         matchesOwner &&
         matchesSource &&
-        matchesIntent &&
         matchesRegion &&
         matchesIndustry
       );
@@ -437,7 +479,6 @@ export default function Home() {
   }, [
     customers,
     industryFilter,
-    intentFilter,
     ownerFilter,
     query,
     regionFilter,
@@ -457,16 +498,15 @@ export default function Home() {
     const won = customers.filter((customer) =>
       ["已成交", "服务中"].includes(customer.status),
     ).length;
-    const today = new Date().toISOString().slice(0, 10);
-    const needsFollowUp = customers.filter(
-      (customer) => customer.nextFollowUp && customer.nextFollowUp <= today,
+    const uploadedDocuments = customers.filter(
+      (customer) => customer.businessLicenseUrl || customer.dbdUrl,
     ).length;
 
     return [
       { label: "客户总数", value: customers.length },
       { label: "活跃客户", value: active },
       { label: "已成交/服务中", value: won },
-      { label: "今日待跟进", value: needsFollowUp },
+      { label: "已上传文件", value: uploadedDocuments },
     ];
   }, [customers]);
 
@@ -522,8 +562,22 @@ export default function Home() {
     setMessage("");
 
     try {
+      const nextForm = { ...form };
+
+      if (licenseFile) {
+        nextForm.businessLicenseUrl = await uploadCustomerDocument(
+          licenseFile,
+          "license",
+          session,
+        );
+      }
+
+      if (dbdFile) {
+        nextForm.dbdUrl = await uploadCustomerDocument(dbdFile, "dbd", session);
+      }
+
       if (editingId) {
-        const updated = await updateCustomer(editingId, form, session);
+        const updated = await updateCustomer(editingId, nextForm, session);
         setCustomers((current) =>
           current.map((customer) =>
             customer.id === editingId ? updated : customer,
@@ -531,12 +585,14 @@ export default function Home() {
         );
         setSelectedId(editingId);
       } else {
-        const created = await createCustomer(form, session);
+        const created = await createCustomer(nextForm, session);
         setCustomers((current) => [created, ...current]);
         setSelectedId(created.id);
       }
 
       setForm(emptyForm);
+      setLicenseFile(null);
+      setDbdFile(null);
       setEditingId(null);
       setCustomerModalOpen(false);
     } catch (error: unknown) {
@@ -552,28 +608,34 @@ export default function Home() {
       contact: customer.contact,
       phone: customer.phone,
       wechat: customer.wechat,
-      whatsapp: customer.whatsapp,
+      lineLark: customer.lineLark,
       email: customer.email,
       region: customer.region,
       industry: customer.industry,
       tiktok: customer.tiktok,
+      adAccountName: customer.adAccountName,
       adAccountId: customer.adAccountId,
       businessCenterId: customer.businessCenterId,
       rebateRate: customer.rebateRate,
+      cooperationStart: customer.cooperationStart,
+      businessLicenseUrl: customer.businessLicenseUrl,
+      dbdUrl: customer.dbdUrl,
       source: customer.source,
-      intent: customer.intent,
       status: customer.status,
       ownerName: customer.ownerName,
-      nextFollowUp: customer.nextFollowUp,
       notes: customer.notes,
     };
     setForm(editable);
+    setLicenseFile(null);
+    setDbdFile(null);
     setEditingId(customer.id);
     setCustomerModalOpen(true);
   }
 
   function startCreate() {
     setForm(emptyForm);
+    setLicenseFile(null);
+    setDbdFile(null);
     setEditingId(null);
     setMessage("");
     setCustomerModalOpen(true);
@@ -583,6 +645,8 @@ export default function Home() {
     setCustomerModalOpen(false);
     setEditingId(null);
     setForm(emptyForm);
+    setLicenseFile(null);
+    setDbdFile(null);
   }
 
   async function archiveCustomer(id: string) {
@@ -738,7 +802,7 @@ export default function Home() {
                   <div>
                     <h2 className="text-lg font-semibold">客户管理</h2>
                     <p className="mt-1 text-sm text-[#667085]">
-                      搜索、筛选、编辑客户，并查看最近跟进安排。
+                      搜索、筛选、编辑客户，并查看合作与账户资料。
                     </p>
                   </div>
                   <button
@@ -801,21 +865,6 @@ export default function Home() {
                     </select>
                   </label>
                   <label className="grid gap-1.5 text-sm font-medium">
-                    意向等级
-                    <select
-                      className="field"
-                      onChange={(event) =>
-                        setIntentFilter(event.target.value as CustomerIntent | "全部")
-                      }
-                      value={intentFilter}
-                    >
-                      <option>全部</option>
-                      {["高", "中", "低"].map((intent) => (
-                        <option key={intent}>{intent}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="grid gap-1.5 text-sm font-medium">
                     地区
                     <select
                       className="field"
@@ -853,12 +902,12 @@ export default function Home() {
                       "公司名",
                       "联系人",
                       "地区",
+                      "广告账户名称",
                       "广告账户ID",
+                      "合作时间",
                       "来源",
                       "状态",
-                      "意向",
                       "负责人",
-                      "下次跟进",
                       "操作",
                     ].map((heading) => (
                       <th className="px-4 py-3 font-semibold" key={heading}>
@@ -881,7 +930,13 @@ export default function Home() {
                       <td className="px-4 py-3">{customer.contact}</td>
                       <td className="px-4 py-3">{customer.region || "-"}</td>
                       <td className="px-4 py-3">
+                        {customer.adAccountName || "-"}
+                      </td>
+                      <td className="px-4 py-3">
                         {customer.adAccountId || "-"}
+                      </td>
+                      <td className="px-4 py-3">
+                        {customer.cooperationStart || "-"}
                       </td>
                       <td className="px-4 py-3">{customer.source}</td>
                       <td className="px-4 py-3">
@@ -889,11 +944,7 @@ export default function Home() {
                           {customer.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3">{customer.intent}</td>
                       <td className="px-4 py-3">{customer.ownerName || "-"}</td>
-                      <td className="px-4 py-3">
-                        {customer.nextFollowUp || "未设置"}
-                      </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">
                           <button
@@ -959,13 +1010,15 @@ export default function Home() {
                   ["联系人", selectedCustomer.contact],
                   ["电话", selectedCustomer.phone || "-"],
                   ["微信", selectedCustomer.wechat || "-"],
-                  ["WhatsApp", selectedCustomer.whatsapp || "-"],
+                  ["Line/Lark", selectedCustomer.lineLark || "-"],
                   ["邮箱", selectedCustomer.email || "-"],
                   ["行业", selectedCustomer.industry || "-"],
                   ["TikTok", selectedCustomer.tiktok || "-"],
+                  ["广告账户名称", selectedCustomer.adAccountName || "-"],
                   ["广告账户ID", selectedCustomer.adAccountId || "-"],
                   ["商务中心ID", selectedCustomer.businessCenterId || "-"],
                   ["返点倍率", selectedCustomer.rebateRate || "-"],
+                  ["客户合作时间", selectedCustomer.cooperationStart || "-"],
                   ["创建日期", selectedCustomer.createdAt],
                 ].map(([label, value]) => (
                   <div
@@ -981,6 +1034,35 @@ export default function Home() {
                   </div>
                 ))}
               </dl>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {[
+                  ["营业执照", selectedCustomer.businessLicenseUrl],
+                  ["DBD", selectedCustomer.dbdUrl],
+                ].map(([label, url]) => (
+                  <div
+                    className="rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3"
+                    key={label}
+                  >
+                    <p className="text-xs font-semibold text-[#667085]">
+                      {label}
+                    </p>
+                    {url ? (
+                      <a
+                        className="mt-1 inline-block text-sm font-semibold text-[#176b87] hover:underline"
+                        href={url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        查看文件
+                      </a>
+                    ) : (
+                      <p className="mt-1 text-sm font-medium text-[#111827]">
+                        未上传
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
             </aside>
           ) : null}
         </section>
@@ -1066,14 +1148,14 @@ export default function Home() {
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
               <label className="grid gap-1.5 text-sm font-medium">
-                WhatsApp
+                Line/Lark
                 <input
                   className="field"
                   onChange={(event) =>
-                    updateField("whatsapp", event.target.value)
+                    updateField("lineLark", event.target.value)
                   }
-                  placeholder="+66..."
-                  value={form.whatsapp}
+                  placeholder="Line ID 或 Lark 联系方式"
+                  value={form.lineLark}
                 />
               </label>
               <label className="grid gap-1.5 text-sm font-medium">
@@ -1127,6 +1209,17 @@ export default function Home() {
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
               <label className="grid gap-1.5 text-sm font-medium">
+                广告账户名称
+                <input
+                  className="field"
+                  onChange={(event) =>
+                    updateField("adAccountName", event.target.value)
+                  }
+                  placeholder="例如 Aurora Ads TH"
+                  value={form.adAccountName}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
                 广告账户ID
                 <input
                   className="field"
@@ -1137,6 +1230,9 @@ export default function Home() {
                   value={form.adAccountId}
                 />
               </label>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
               <label className="grid gap-1.5 text-sm font-medium">
                 商务中心ID
                 <input
@@ -1177,33 +1273,19 @@ export default function Home() {
                 </select>
               </label>
               <label className="grid gap-1.5 text-sm font-medium">
-                下次跟进
+                客户合作时间
                 <input
                   className="field"
                   onChange={(event) =>
-                    updateField("nextFollowUp", event.target.value)
+                    updateField("cooperationStart", event.target.value)
                   }
                   type="date"
-                  value={form.nextFollowUp}
+                  value={form.cooperationStart}
                 />
               </label>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
-              <label className="grid gap-1.5 text-sm font-medium">
-                意向等级
-                <select
-                  className="field"
-                  onChange={(event) =>
-                    updateField("intent", event.target.value as CustomerIntent)
-                  }
-                  value={form.intent}
-                >
-                  {["高", "中", "低"].map((intent) => (
-                    <option key={intent}>{intent}</option>
-                  ))}
-                </select>
-              </label>
               <label className="grid gap-1.5 text-sm font-medium">
                 当前状态
                 <select
@@ -1217,6 +1299,55 @@ export default function Home() {
                     <option key={status}>{status}</option>
                   ))}
                 </select>
+              </label>
+            </div>
+
+            <div className="border-t border-[#edf0f4] pt-4">
+              <h3 className="text-sm font-semibold text-[#111827]">
+                文件上传
+              </h3>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+              <label className="grid gap-1.5 text-sm font-medium">
+                营业执照
+                <input
+                  className="field"
+                  onChange={(event) =>
+                    setLicenseFile(event.target.files?.[0] ?? null)
+                  }
+                  type="file"
+                />
+                {form.businessLicenseUrl ? (
+                  <a
+                    className="text-sm font-semibold text-[#176b87] hover:underline"
+                    href={form.businessLicenseUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    已有文件：查看
+                  </a>
+                ) : null}
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                DBD
+                <input
+                  className="field"
+                  onChange={(event) =>
+                    setDbdFile(event.target.files?.[0] ?? null)
+                  }
+                  type="file"
+                />
+                {form.dbdUrl ? (
+                  <a
+                    className="text-sm font-semibold text-[#176b87] hover:underline"
+                    href={form.dbdUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    已有文件：查看
+                  </a>
+                ) : null}
               </label>
             </div>
 
