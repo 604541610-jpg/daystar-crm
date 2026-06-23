@@ -99,6 +99,47 @@ create table if not exists public.follow_ups (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.customer_ad_accounts (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  account_name text,
+  account_id text,
+  business_center_id text,
+  rebate_rate text,
+  status text not null default '启用' check (status in ('启用', '暂停', '已关闭')),
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into public.customer_ad_accounts (
+  customer_id,
+  account_name,
+  account_id,
+  business_center_id,
+  rebate_rate,
+  status
+)
+select
+  id,
+  ad_account_name,
+  ad_account_id,
+  business_center_id,
+  rebate_rate,
+  '启用'
+from public.customers
+where (
+    ad_account_name is not null
+    or ad_account_id is not null
+    or business_center_id is not null
+    or rebate_rate is not null
+  )
+  and not exists (
+    select 1
+    from public.customer_ad_accounts
+    where customer_ad_accounts.customer_id = customers.id
+  );
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -117,6 +158,11 @@ for each row execute function public.set_updated_at();
 drop trigger if exists set_customers_updated_at on public.customers;
 create trigger set_customers_updated_at
 before update on public.customers
+for each row execute function public.set_updated_at();
+
+drop trigger if exists set_customer_ad_accounts_updated_at on public.customer_ad_accounts;
+create trigger set_customer_ad_accounts_updated_at
+before update on public.customer_ad_accounts
 for each row execute function public.set_updated_at();
 
 create or replace function public.handle_new_user()
@@ -146,6 +192,7 @@ for each row execute function public.handle_new_user();
 alter table public.profiles enable row level security;
 alter table public.customers enable row level security;
 alter table public.follow_ups enable row level security;
+alter table public.customer_ad_accounts enable row level security;
 
 insert into storage.buckets (id, name, public)
 values ('customer-documents', 'customer-documents', true)
@@ -199,6 +246,31 @@ on public.customers for update
 to authenticated
 using (true)
 with check (true);
+
+drop policy if exists "customer_ad_accounts_select_authenticated" on public.customer_ad_accounts;
+create policy "customer_ad_accounts_select_authenticated"
+on public.customer_ad_accounts for select
+to authenticated
+using (true);
+
+drop policy if exists "customer_ad_accounts_insert_authenticated" on public.customer_ad_accounts;
+create policy "customer_ad_accounts_insert_authenticated"
+on public.customer_ad_accounts for insert
+to authenticated
+with check (true);
+
+drop policy if exists "customer_ad_accounts_update_authenticated" on public.customer_ad_accounts;
+create policy "customer_ad_accounts_update_authenticated"
+on public.customer_ad_accounts for update
+to authenticated
+using (true)
+with check (true);
+
+drop policy if exists "customer_ad_accounts_delete_authenticated" on public.customer_ad_accounts;
+create policy "customer_ad_accounts_delete_authenticated"
+on public.customer_ad_accounts for delete
+to authenticated
+using (true);
 
 drop policy if exists "follow_ups_select_related_customer" on public.follow_ups;
 create policy "follow_ups_select_related_customer"

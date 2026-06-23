@@ -24,10 +24,7 @@ type Customer = {
   region: string;
   industry: string;
   tiktok: string;
-  adAccountName: string;
-  adAccountId: string;
-  businessCenterId: string;
-  rebateRate: string;
+  adAccounts: AdAccount[];
   cooperationStart: string;
   businessLicenseUrl: string;
   dbdUrl: string;
@@ -39,6 +36,16 @@ type Customer = {
 };
 
 type CustomerForm = Omit<Customer, "id" | "createdAt">;
+
+type AdAccount = {
+  id?: string;
+  accountName: string;
+  accountId: string;
+  businessCenterId: string;
+  rebateRate: string;
+  status: "启用" | "暂停" | "已关闭";
+  notes: string;
+};
 
 type AuthSession = {
   accessToken: string;
@@ -62,6 +69,7 @@ type SupabaseCustomerRow = {
   ad_account_id: string | null;
   business_center_id: string | null;
   rebate_rate: string | null;
+  customer_ad_accounts?: SupabaseAdAccountRow[];
   cooperation_start: string | null;
   business_license_url: string | null;
   dbd_url: string | null;
@@ -70,6 +78,17 @@ type SupabaseCustomerRow = {
   owner_name: string | null;
   notes: string | null;
   created_at: string;
+};
+
+type SupabaseAdAccountRow = {
+  id: string;
+  customer_id: string;
+  account_name: string | null;
+  account_id: string | null;
+  business_center_id: string | null;
+  rebate_rate: string | null;
+  status: AdAccount["status"];
+  notes: string | null;
 };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -97,10 +116,16 @@ const emptyForm: CustomerForm = {
   region: "",
   industry: "",
   tiktok: "",
-  adAccountName: "",
-  adAccountId: "",
-  businessCenterId: "",
-  rebateRate: "",
+  adAccounts: [
+    {
+      accountName: "",
+      accountId: "",
+      businessCenterId: "",
+      rebateRate: "",
+      status: "启用",
+      notes: "",
+    },
+  ],
   cooperationStart: "",
   businessLicenseUrl: "",
   dbdUrl: "",
@@ -114,7 +139,62 @@ function formatDate(value: string) {
   return value ? value.slice(0, 10) : "";
 }
 
+function emptyAdAccount(): AdAccount {
+  return {
+    accountName: "",
+    accountId: "",
+    businessCenterId: "",
+    rebateRate: "",
+    status: "启用",
+    notes: "",
+  };
+}
+
+function normalizeAdAccounts(accounts: AdAccount[]) {
+  const normalized = accounts.filter((account) =>
+    [
+      account.accountName,
+      account.accountId,
+      account.businessCenterId,
+      account.rebateRate,
+      account.notes,
+    ].some((value) => value.trim()),
+  );
+
+  return normalized.length ? normalized : [emptyAdAccount()];
+}
+
+function mapAdAccount(row: SupabaseAdAccountRow): AdAccount {
+  return {
+    id: row.id,
+    accountName: row.account_name ?? "",
+    accountId: row.account_id ?? "",
+    businessCenterId: row.business_center_id ?? "",
+    rebateRate: row.rebate_rate ?? "",
+    status: row.status ?? "启用",
+    notes: row.notes ?? "",
+  };
+}
+
 function mapCustomer(row: SupabaseCustomerRow): Customer {
+  const relatedAccounts = row.customer_ad_accounts?.map(mapAdAccount) ?? [];
+  const legacyAccount =
+    row.ad_account_name ||
+    row.ad_account_id ||
+    row.business_center_id ||
+    row.rebate_rate
+      ? [
+          {
+            accountName: row.ad_account_name ?? "",
+            accountId: row.ad_account_id ?? "",
+            businessCenterId: row.business_center_id ?? "",
+            rebateRate: row.rebate_rate ?? "",
+            status: "启用" as const,
+            notes: "",
+          },
+        ]
+      : [];
+
   return {
     id: row.id,
     company: row.company,
@@ -126,10 +206,7 @@ function mapCustomer(row: SupabaseCustomerRow): Customer {
     region: row.region ?? "",
     industry: row.industry ?? "",
     tiktok: row.tiktok ?? "",
-    adAccountName: row.ad_account_name ?? "",
-    adAccountId: row.ad_account_id ?? "",
-    businessCenterId: row.business_center_id ?? "",
-    rebateRate: row.rebate_rate ?? "",
+    adAccounts: relatedAccounts.length ? relatedAccounts : legacyAccount,
     cooperationStart: row.cooperation_start ?? "",
     businessLicenseUrl: row.business_license_url ?? "",
     dbdUrl: row.dbd_url ?? "",
@@ -156,10 +233,6 @@ function toCustomerPayload(
     region: form.region || null,
     industry: form.industry || null,
     tiktok: form.tiktok || null,
-    ad_account_name: form.adAccountName || null,
-    ad_account_id: form.adAccountId || null,
-    business_center_id: form.businessCenterId || null,
-    rebate_rate: form.rebateRate || null,
     cooperation_start: form.cooperationStart || null,
     business_license_url: form.businessLicenseUrl || null,
     dbd_url: form.dbdUrl || null,
@@ -175,6 +248,18 @@ function toCustomerPayload(
   }
 
   return payload;
+}
+
+function toAdAccountPayload(customerId: string, account: AdAccount) {
+  return {
+    account_id: account.accountId || null,
+    account_name: account.accountName || null,
+    business_center_id: account.businessCenterId || null,
+    customer_id: customerId,
+    notes: account.notes || null,
+    rebate_rate: account.rebateRate || null,
+    status: account.status,
+  };
 }
 
 function getErrorMessage(error: unknown) {
@@ -305,12 +390,54 @@ async function signUp(email: string, password: string, fullName: string) {
 
 async function fetchCustomers(session: AuthSession) {
   const rows = await supabaseRequest<SupabaseCustomerRow[]>(
-    "/rest/v1/customers?select=*&order=created_at.desc",
+    "/rest/v1/customers?select=*,customer_ad_accounts(*)&order=created_at.desc&customer_ad_accounts.order=created_at.asc",
     {},
     session.accessToken,
   );
 
   return rows.map(mapCustomer);
+}
+
+async function replaceAdAccounts(
+  customerId: string,
+  accounts: AdAccount[],
+  session: AuthSession,
+) {
+  await supabaseRequest<null>(
+    `/rest/v1/customer_ad_accounts?customer_id=eq.${customerId}`,
+    {
+      method: "DELETE",
+    },
+    session.accessToken,
+  );
+
+  const payload = normalizeAdAccounts(accounts)
+    .filter((account) =>
+      [
+        account.accountName,
+        account.accountId,
+        account.businessCenterId,
+        account.rebateRate,
+        account.notes,
+      ].some((value) => value.trim()),
+    )
+    .map((account) => toAdAccountPayload(customerId, account));
+
+  if (!payload.length) {
+    return [];
+  }
+
+  const rows = await supabaseRequest<SupabaseAdAccountRow[]>(
+    "/rest/v1/customer_ad_accounts",
+    {
+      body: JSON.stringify(payload),
+      headers: { Prefer: "return=representation" },
+      method: "POST",
+    },
+    session.accessToken,
+  );
+
+  return rows.map(mapAdAccount);
 }
 
 async function createCustomer(form: CustomerForm, session: AuthSession) {
@@ -326,7 +453,14 @@ async function createCustomer(form: CustomerForm, session: AuthSession) {
     session.accessToken,
   );
 
-  return mapCustomer(rows[0]);
+  const created = mapCustomer(rows[0]);
+  const adAccounts = await replaceAdAccounts(
+    created.id,
+    form.adAccounts,
+    session,
+  );
+
+  return { ...created, adAccounts };
 }
 
 async function updateCustomer(
@@ -335,7 +469,7 @@ async function updateCustomer(
   session: AuthSession,
 ) {
   const rows = await supabaseRequest<SupabaseCustomerRow[]>(
-    `/rest/v1/customers?id=eq.${customerId}`,
+    `/rest/v1/customers?id=eq.${customerId}&select=*,customer_ad_accounts(*)`,
     {
       body: JSON.stringify(
         toCustomerPayload(form, session, { includeOwnership: false }),
@@ -346,7 +480,14 @@ async function updateCustomer(
     session.accessToken,
   );
 
-  return mapCustomer(rows[0]);
+  const updated = mapCustomer(rows[0]);
+  const adAccounts = await replaceAdAccounts(
+    customerId,
+    form.adAccounts,
+    session,
+  );
+
+  return { ...updated, adAccounts };
 }
 
 async function updateCustomerStatus(
@@ -355,7 +496,7 @@ async function updateCustomerStatus(
   session: AuthSession,
 ) {
   const rows = await supabaseRequest<SupabaseCustomerRow[]>(
-    `/rest/v1/customers?id=eq.${customerId}`,
+    `/rest/v1/customers?id=eq.${customerId}&select=*,customer_ad_accounts(*)`,
     {
       body: JSON.stringify({ status }),
       headers: { Prefer: "return=representation" },
@@ -458,10 +599,14 @@ export default function Home() {
         customer.email,
         customer.region,
         customer.industry,
-        customer.adAccountName,
-        customer.adAccountId,
-        customer.businessCenterId,
-        customer.rebateRate,
+        ...customer.adAccounts.flatMap((account) => [
+          account.accountName,
+          account.accountId,
+          account.businessCenterId,
+          account.rebateRate,
+          account.status,
+          account.notes,
+        ]),
         customer.cooperationStart,
         customer.ownerName,
       ]
@@ -528,6 +673,36 @@ export default function Home() {
     value: CustomerForm[K],
   ) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateAdAccount<K extends keyof AdAccount>(
+    index: number,
+    key: K,
+    value: AdAccount[K],
+  ) {
+    setForm((current) => ({
+      ...current,
+      adAccounts: current.adAccounts.map((account, accountIndex) =>
+        accountIndex === index ? { ...account, [key]: value } : account,
+      ),
+    }));
+  }
+
+  function addAdAccount() {
+    setForm((current) => ({
+      ...current,
+      adAccounts: [...current.adAccounts, emptyAdAccount()],
+    }));
+  }
+
+  function removeAdAccount(index: number) {
+    setForm((current) => ({
+      ...current,
+      adAccounts:
+        current.adAccounts.length > 1
+          ? current.adAccounts.filter((_, accountIndex) => accountIndex !== index)
+          : [emptyAdAccount()],
+    }));
   }
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
@@ -626,10 +801,7 @@ export default function Home() {
       region: customer.region,
       industry: customer.industry,
       tiktok: customer.tiktok,
-      adAccountName: customer.adAccountName,
-      adAccountId: customer.adAccountId,
-      businessCenterId: customer.businessCenterId,
-      rebateRate: customer.rebateRate,
+      adAccounts: normalizeAdAccounts(customer.adAccounts),
       cooperationStart: customer.cooperationStart,
       businessLicenseUrl: customer.businessLicenseUrl,
       dbdUrl: customer.dbdUrl,
@@ -915,8 +1087,8 @@ export default function Home() {
                       "公司名",
                       "联系人",
                       "地区",
-                      "广告账户名称",
-                      "广告账户ID",
+                      "广告账户",
+                      "账户数量",
                       "合作时间",
                       "来源",
                       "状态",
@@ -943,10 +1115,18 @@ export default function Home() {
                       <td className="px-4 py-3">{customer.contact}</td>
                       <td className="px-4 py-3">{customer.region || "-"}</td>
                       <td className="px-4 py-3">
-                        {customer.adAccountName || "-"}
+                        {customer.adAccounts[0]?.accountId ||
+                          customer.adAccounts[0]?.accountName ||
+                          "-"}
                       </td>
                       <td className="px-4 py-3">
-                        {customer.adAccountId || "-"}
+                        {customer.adAccounts.filter((account) =>
+                          [
+                            account.accountName,
+                            account.accountId,
+                            account.businessCenterId,
+                          ].some(Boolean),
+                        ).length || 0}
                       </td>
                       <td className="px-4 py-3">
                         {customer.cooperationStart || "-"}
@@ -1027,10 +1207,7 @@ export default function Home() {
                   ["邮箱", selectedCustomer.email || "-"],
                   ["行业", selectedCustomer.industry || "-"],
                   ["TikTok", selectedCustomer.tiktok || "-"],
-                  ["广告账户名称", selectedCustomer.adAccountName || "-"],
-                  ["广告账户ID", selectedCustomer.adAccountId || "-"],
-                  ["商务中心ID", selectedCustomer.businessCenterId || "-"],
-                  ["返点倍率", selectedCustomer.rebateRate || "-"],
+                  ["广告账户数量", String(selectedCustomer.adAccounts.length)],
                   ["客户合作时间", selectedCustomer.cooperationStart || "-"],
                   ["创建日期", selectedCustomer.createdAt],
                 ].map(([label, value]) => (
@@ -1047,6 +1224,53 @@ export default function Home() {
                   </div>
                 ))}
               </dl>
+              <div className="mt-4 rounded-md border border-[#edf0f4] bg-[#fbfcfd]">
+                <div className="border-b border-[#edf0f4] px-3 py-2">
+                  <h3 className="text-sm font-semibold text-[#111827]">
+                    广告账户列表
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+                    <thead className="text-xs uppercase text-[#64748b]">
+                      <tr>
+                        {[
+                          "广告账户名称",
+                          "广告账户ID",
+                          "商务中心ID",
+                          "返点倍率",
+                          "状态",
+                          "备注",
+                        ].map((heading) => (
+                          <th className="px-3 py-2 font-semibold" key={heading}>
+                            {heading}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedCustomer.adAccounts.map((account, index) => (
+                        <tr className="border-t border-[#edf0f4]" key={index}>
+                          <td className="px-3 py-2">
+                            {account.accountName || "-"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {account.accountId || "-"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {account.businessCenterId || "-"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {account.rebateRate || "-"}
+                          </td>
+                          <td className="px-3 py-2">{account.status}</td>
+                          <td className="px-3 py-2">{account.notes || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 {[
                   ["营业执照", selectedCustomer.businessLicenseUrl],
@@ -1215,60 +1439,121 @@ export default function Home() {
             </label>
 
             <div className="border-t border-[#edf0f4] pt-4">
-              <h3 className="text-sm font-semibold text-[#111827]">
-                账户信息
-              </h3>
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-[#111827]">
+                  广告账户
+                </h3>
+                <button
+                  className="rounded-md border border-[#176b87] px-3 py-2 text-sm font-semibold text-[#176b87] hover:bg-[#eef8fb]"
+                  onClick={addAdAccount}
+                  type="button"
+                >
+                  + 添加广告账户
+                </button>
+              </div>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
-              <label className="grid gap-1.5 text-sm font-medium">
-                广告账户名称
-                <input
-                  className="field"
-                  onChange={(event) =>
-                    updateField("adAccountName", event.target.value)
-                  }
-                  placeholder="例如 Aurora Ads TH"
-                  value={form.adAccountName}
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium">
-                广告账户ID
-                <input
-                  className="field"
-                  onChange={(event) =>
-                    updateField("adAccountId", event.target.value)
-                  }
-                  placeholder="例如 act_1029384756"
-                  value={form.adAccountId}
-                />
-              </label>
+            <div className="grid gap-3">
+              {form.adAccounts.map((account, index) => (
+                <div
+                  className="rounded-lg border border-[#dfe3ea] bg-[#fbfcfd] p-3"
+                  key={index}
+                >
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-[#111827]">
+                      广告账户 {index + 1}
+                    </p>
+                    <button
+                      className="rounded-md border border-[#d7dce4] px-3 py-1.5 text-sm font-semibold text-[#334155] hover:bg-white"
+                      onClick={() => removeAdAccount(index)}
+                      type="button"
+                    >
+                      删除
+                    </button>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      广告账户名称
+                      <input
+                        className="field"
+                        onChange={(event) =>
+                          updateAdAccount(index, "accountName", event.target.value)
+                        }
+                        placeholder="例如 Aurora Ads TH"
+                        value={account.accountName}
+                      />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      广告账户ID
+                      <input
+                        className="field"
+                        onChange={(event) =>
+                          updateAdAccount(index, "accountId", event.target.value)
+                        }
+                        placeholder="例如 act_1029384756"
+                        value={account.accountId}
+                      />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      商务中心ID
+                      <input
+                        className="field"
+                        onChange={(event) =>
+                          updateAdAccount(
+                            index,
+                            "businessCenterId",
+                            event.target.value,
+                          )
+                        }
+                        placeholder="例如 bc_5647382910"
+                        value={account.businessCenterId}
+                      />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      返点倍率
+                      <input
+                        className="field"
+                        inputMode="decimal"
+                        onChange={(event) =>
+                          updateAdAccount(index, "rebateRate", event.target.value)
+                        }
+                        placeholder="例如 1.05 / 5%"
+                        value={account.rebateRate}
+                      />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      账户状态
+                      <select
+                        className="field"
+                        onChange={(event) =>
+                          updateAdAccount(
+                            index,
+                            "status",
+                            event.target.value as AdAccount["status"],
+                          )
+                        }
+                        value={account.status}
+                      >
+                        {["启用", "暂停", "已关闭"].map((status) => (
+                          <option key={status}>{status}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-medium">
+                      账户备注
+                      <input
+                        className="field"
+                        onChange={(event) =>
+                          updateAdAccount(index, "notes", event.target.value)
+                        }
+                        placeholder="开户主体、币种、用途等"
+                        value={account.notes}
+                      />
+                    </label>
+                  </div>
+                </div>
+              ))}
             </div>
-
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
-              <label className="grid gap-1.5 text-sm font-medium">
-                商务中心ID
-                <input
-                  className="field"
-                  onChange={(event) =>
-                    updateField("businessCenterId", event.target.value)
-                  }
-                  placeholder="例如 bc_5647382910"
-                  value={form.businessCenterId}
-                />
-              </label>
-            </div>
-
-            <label className="grid gap-1.5 text-sm font-medium">
-              返点倍率
-              <input
-                className="field"
-                inputMode="decimal"
-                onChange={(event) => updateField("rebateRate", event.target.value)}
-                placeholder="例如 1.05 / 5%"
-                value={form.rebateRate}
-              />
-            </label>
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
               <label className="grid gap-1.5 text-sm font-medium">
