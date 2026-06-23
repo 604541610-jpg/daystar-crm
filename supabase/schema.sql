@@ -182,11 +182,7 @@ drop policy if exists "customers_select_team" on public.customers;
 create policy "customers_select_team"
 on public.customers for select
 to authenticated
-using (
-  owner_id = auth.uid()
-  or created_by = auth.uid()
-  or public.is_admin_or_manager()
-);
+using (true);
 
 drop policy if exists "customers_insert_authenticated" on public.customers;
 create policy "customers_insert_authenticated"
@@ -201,16 +197,8 @@ drop policy if exists "customers_update_owner_or_manager" on public.customers;
 create policy "customers_update_owner_or_manager"
 on public.customers for update
 to authenticated
-using (
-  owner_id = auth.uid()
-  or created_by = auth.uid()
-  or public.is_admin_or_manager()
-)
-with check (
-  owner_id = auth.uid()
-  or created_by = auth.uid()
-  or public.is_admin_or_manager()
-);
+using (true)
+with check (true);
 
 drop policy if exists "follow_ups_select_related_customer" on public.follow_ups;
 create policy "follow_ups_select_related_customer"

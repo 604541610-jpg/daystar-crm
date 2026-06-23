@@ -141,8 +141,12 @@ function mapCustomer(row: SupabaseCustomerRow): Customer {
   };
 }
 
-function toCustomerPayload(form: CustomerForm, session: AuthSession) {
-  return {
+function toCustomerPayload(
+  form: CustomerForm,
+  session: AuthSession,
+  options: { includeOwnership: boolean },
+) {
+  const payload: Record<string, string | null> = {
     company: form.company.trim(),
     contact: form.contact.trim(),
     phone: form.phone || null,
@@ -161,11 +165,16 @@ function toCustomerPayload(form: CustomerForm, session: AuthSession) {
     dbd_url: form.dbdUrl || null,
     source: form.source,
     status: form.status,
-    owner_id: session.userId,
     owner_name: form.ownerName || session.fullName || session.email,
     notes: form.notes || null,
-    created_by: session.userId,
   };
+
+  if (options.includeOwnership) {
+    payload.owner_id = session.userId;
+    payload.created_by = session.userId;
+  }
+
+  return payload;
 }
 
 function getErrorMessage(error: unknown) {
@@ -308,7 +317,9 @@ async function createCustomer(form: CustomerForm, session: AuthSession) {
   const rows = await supabaseRequest<SupabaseCustomerRow[]>(
     "/rest/v1/customers",
     {
-      body: JSON.stringify(toCustomerPayload(form, session)),
+      body: JSON.stringify(
+        toCustomerPayload(form, session, { includeOwnership: true }),
+      ),
       headers: { Prefer: "return=representation" },
       method: "POST",
     },
@@ -326,7 +337,9 @@ async function updateCustomer(
   const rows = await supabaseRequest<SupabaseCustomerRow[]>(
     `/rest/v1/customers?id=eq.${customerId}`,
     {
-      body: JSON.stringify(toCustomerPayload(form, session)),
+      body: JSON.stringify(
+        toCustomerPayload(form, session, { includeOwnership: false }),
+      ),
       headers: { Prefer: "return=representation" },
       method: "PATCH",
     },
