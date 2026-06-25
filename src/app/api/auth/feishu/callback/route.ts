@@ -26,9 +26,6 @@ type AppAccessTokenResponse = FeishuResponse<AppAccessTokenData> &
 
 type UserAccessTokenData = {
   access_token: string;
-};
-
-type FeishuUserInfo = {
   avatar_url?: string;
   email?: string;
   en_name?: string;
@@ -91,20 +88,7 @@ async function getUserAccessToken(code: string, appAccessToken: string) {
     appAccessToken,
   );
 
-  return data.access_token;
-}
-
-async function getUserInfo(accessToken: string) {
-  const response = await fetch(`${getFeishuBaseUrl()}/open-apis/authen/v1/user_info`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const data = (await response.json()) as FeishuResponse<FeishuUserInfo>;
-
-  if (!response.ok || data.code !== 0 || !data.data) {
-    throw new Error(data.msg || "无法获取飞书用户信息。");
-  }
-
-  return data.data;
+  return data;
 }
 
 export async function GET(request: NextRequest) {
@@ -120,8 +104,7 @@ export async function GET(request: NextRequest) {
     }
 
     const appAccessToken = await getAppAccessToken();
-    const userAccessToken = await getUserAccessToken(code, appAccessToken);
-    const user = await getUserInfo(userAccessToken);
+    const user = await getUserAccessToken(code, appAccessToken);
 
     if (!isAllowedUser(user)) {
       throw new Error("该飞书账号未被允许访问 CRM。");
