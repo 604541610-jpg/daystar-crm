@@ -21,6 +21,9 @@ type AppAccessTokenData = {
   app_access_token: string;
 };
 
+type AppAccessTokenResponse = FeishuResponse<AppAccessTokenData> &
+  AppAccessTokenData;
+
 type UserAccessTokenData = {
   access_token: string;
 };
@@ -58,13 +61,22 @@ async function feishuPost<T>(
 }
 
 async function getAppAccessToken() {
-  const data = await feishuPost<AppAccessTokenData>(
-    "/open-apis/auth/v3/app_access_token/internal",
+  const response = await fetch(
+    `${getFeishuBaseUrl()}/open-apis/auth/v3/app_access_token/internal`,
     {
-      app_id: getRequiredEnv("FEISHU_APP_ID"),
-      app_secret: getRequiredEnv("FEISHU_APP_SECRET"),
+      body: JSON.stringify({
+        app_id: getRequiredEnv("FEISHU_APP_ID"),
+        app_secret: getRequiredEnv("FEISHU_APP_SECRET"),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
   );
+  const data = (await response.json()) as AppAccessTokenResponse;
+
+  if (!response.ok || data.code !== 0 || !data.app_access_token) {
+    throw new Error(data.msg || "无法获取飞书应用凭证。");
+  }
 
   return data.app_access_token;
 }
