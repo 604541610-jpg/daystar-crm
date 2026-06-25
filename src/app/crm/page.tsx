@@ -93,7 +93,6 @@ type SupabaseCustomerRow = {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
-const sessionKey = "raysense-session";
 
 const statuses: CustomerStatus[] = [
   "新客户",
@@ -140,12 +139,6 @@ const emptyForm: CustomerForm = {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请稍后重试。";
-}
-
-function isValidSession(value: unknown): value is AuthSession {
-  if (!value || typeof value !== "object") return false;
-  const session = value as Partial<AuthSession>;
-  return Boolean(session.accessToken && session.email && session.userId);
 }
 
 function formatDate(value: string | null) {
@@ -223,41 +216,6 @@ async function supabaseRequest<T>(path: string, options: RequestInit = {}, acces
   if (!response.ok) throw new Error((await response.text()) || response.statusText);
   if (response.status === 204) return null as T;
   return (await response.json()) as T;
-}
-
-async function signIn(email: string, password: string) {
-  const data = await supabaseRequest<{
-    access_token: string;
-    user: { email?: string; id: string; user_metadata?: { full_name?: string } };
-  }>("/auth/v1/token?grant_type=password", {
-    body: JSON.stringify({ email, password }),
-    method: "POST",
-  });
-
-  return {
-    accessToken: data.access_token,
-    email: data.user.email ?? email,
-    fullName: data.user.user_metadata?.full_name ?? email.split("@")[0],
-    userId: data.user.id,
-  };
-}
-
-async function signUp(email: string, password: string, fullName: string) {
-  const data = await supabaseRequest<{
-    access_token?: string;
-    user: { email?: string; id: string; user_metadata?: { full_name?: string } };
-  }>("/auth/v1/signup", {
-    body: JSON.stringify({ email, password, data: { full_name: fullName } }),
-    method: "POST",
-  });
-
-  if (!data.access_token) throw new Error("账号已创建，请先完成邮箱确认或直接登录。");
-  return {
-    accessToken: data.access_token,
-    email: data.user.email ?? email,
-    fullName: data.user.user_metadata?.full_name ?? fullName,
-    userId: data.user.id,
-  };
 }
 
 async function uploadDocument(file: File, kind: "license" | "dbd", session: AuthSession) {
@@ -375,9 +333,6 @@ async function updateStatus(customerId: string, status: CustomerStatus, session:
 
 export default function CrmPage() {
   const [session, setSession] = useState<AuthSession | null>(null);
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authName, setAuthName] = useState("");
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [form, setForm] = useState<CustomerForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -387,28 +342,36 @@ export default function CrmPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [licenseFile, setLicenseFile] = useState<File | null>(null);
   const [dbdFile, setDbdFile] = useState<File | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(sessionKey);
-      if (!stored) return;
-      const parsed = JSON.parse(stored) as unknown;
-      if (!isValidSession(parsed)) {
-        window.localStorage.removeItem(sessionKey);
-        return;
+    async function loadSession() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const error = params.get("error");
+
+        if (error) setMessage(error);
+
+        const response = await fetch("/api/auth/session");
+        const data = (await response.json()) as { session: AuthSession | null };
+
+        if (!data.session) return;
+
+        setSession(data.session);
+        const items = await fetchCustomers(data.session);
+        setCustomers(items);
+        setSelectedId(items[0]?.id ?? "");
+      } catch (error: unknown) {
+        setSession(null);
+        setMessage(getErrorMessage(error));
+      } finally {
+        setCheckingSession(false);
       }
-      setSession(parsed);
-      fetchCustomers(parsed)
-        .then((items) => {
-          setCustomers(items);
-          setSelectedId(items[0]?.id ?? "");
-        })
-        .catch((error: unknown) => setMessage(getErrorMessage(error)));
-    } catch (error: unknown) {
-      setMessage(getErrorMessage(error));
     }
+
+    loadSession();
   }, []);
 
   const filteredCustomers = useMemo(() => {
@@ -436,15 +399,11 @@ export default function CrmPage() {
   }, [customers, query, statusFilter]);
 
   const selectedCustomer = customers.find((item) => item.id === selectedId) ?? filteredCustomers[0] ?? customers[0];
-  const activeCustomers = customers.filter((item) => !["暂停", "流失"].includes(item.status)).length;
-  const servedCustomers = customers.filter((item) => ["已成交", "服务中"].includes(item.status)).length;
-  const uploadedDocuments = customers.filter((item) => item.businessLicenseUrl || item.dbdUrl).length;
-
   const stats = [
     ["客户总数", customers.length],
-    ["活跃客户", activeCustomers],
-    ["成交/服务中", servedCustomers],
-    ["已上传资料", uploadedDocuments],
+    ["活跃客户", customers.filter((item) => !["暂停", "流失"].includes(item.status)).length],
+    ["成交/服务中", customers.filter((item) => ["已成交", "服务中"].includes(item.status)).length],
+    ["已上传资料", customers.filter((item) => item.businessLicenseUrl || item.dbdUrl).length],
   ];
 
   function updateField<K extends keyof CustomerForm>(key: K, value: CustomerForm[K]) {
@@ -501,24 +460,6 @@ export default function CrmPage() {
     setSelectedId((current) => current || items[0]?.id || "");
   }
 
-  async function handleAuth(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSaving(true);
-    setMessage("");
-
-    try {
-      const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
-      const nextSession = submitter?.value === "sign-up" ? await signUp(authEmail, authPassword, authName || authEmail) : await signIn(authEmail, authPassword);
-      window.localStorage.setItem(sessionKey, JSON.stringify(nextSession));
-      setSession(nextSession);
-      await refresh(nextSession);
-    } catch (error: unknown) {
-      setMessage(getErrorMessage(error));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session) return;
@@ -561,68 +502,32 @@ export default function CrmPage() {
     }
   }
 
-  function signOut() {
-    window.localStorage.removeItem(sessionKey);
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
     setSession(null);
     setCustomers([]);
-    setAuthPassword("");
+    setSelectedId("");
+  }
+
+  if (checkingSession) {
+    return <main className="grid min-h-screen place-items-center bg-[#eef3f4] px-5 text-[#111827]"><section className="w-full max-w-md rounded-lg border border-[#dfe3ea] bg-white p-6 text-center shadow-sm"><p className="text-sm font-medium text-[#55708d]">Raysense Global CRM</p><h1 className="mt-2 text-xl font-semibold">正在验证飞书登录状态</h1></section></main>;
   }
 
   if (!session) {
-    return (
-      <main className="grid min-h-screen place-items-center bg-[#eef3f4] px-5 text-[#111827]">
-        <section className="w-full max-w-md rounded-lg border border-[#dfe3ea] bg-white p-6 shadow-sm">
-          <a className="text-sm font-semibold text-[#0d5b4d]" href="/">Raysense Global</a>
-          <h1 className="mt-2 text-2xl font-semibold">CRM 系统登录</h1>
-          <form className="mt-5 grid gap-4" onSubmit={handleAuth}>
-            <label className="grid gap-1.5 text-sm font-medium">姓名<input className="field" onChange={(event) => setAuthName(event.target.value)} placeholder="注册时填写，登录可留空" value={authName} /></label>
-            <label className="grid gap-1.5 text-sm font-medium">邮箱<input className="field" onChange={(event) => setAuthEmail(event.target.value)} required type="email" value={authEmail} /></label>
-            <label className="grid gap-1.5 text-sm font-medium">密码<input className="field" minLength={6} onChange={(event) => setAuthPassword(event.target.value)} required type="password" value={authPassword} /></label>
-            {message ? <div className="rounded-md border border-[#f2c4c4] bg-[#fff5f5] p-3 text-sm text-[#9f1d1d]">{message}</div> : null}
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button className="rounded-md bg-[#0d5b4d] px-4 py-3 text-sm font-semibold text-white disabled:opacity-60" disabled={saving} type="submit" value="sign-in">{saving ? "处理中..." : "登录"}</button>
-              <button className="rounded-md border border-[#0d5b4d] px-4 py-3 text-sm font-semibold text-[#0d5b4d] disabled:opacity-60" disabled={saving} type="submit" value="sign-up">注册</button>
-            </div>
-          </form>
-        </section>
-      </main>
-    );
+    return <main className="grid min-h-screen place-items-center bg-[#eef3f4] px-5 text-[#111827]"><section className="w-full max-w-md rounded-lg border border-[#dfe3ea] bg-white p-6 shadow-sm"><a className="text-sm font-semibold text-[#0d5b4d]" href="/">Raysense Global</a><h1 className="mt-2 text-2xl font-semibold">使用飞书登录</h1><p className="mt-3 text-sm leading-6 text-[#667085]">CRM 仅允许公司飞书账号访问。请使用飞书完成身份验证后进入系统。</p><div className="mt-5 grid gap-4">{message ? <div className="rounded-md border border-[#f2c4c4] bg-[#fff5f5] p-3 text-sm text-[#9f1d1d]">{message}</div> : null}<a className="rounded-md bg-[#176b87] px-4 py-3 text-center text-sm font-semibold text-white hover:bg-[#145b73]" href="/api/auth/feishu/start">使用飞书登录</a><div className="rounded-md border border-[#dfe3ea] bg-[#fbfcfd] p-3 text-xs leading-5 text-[#667085]">如果你的飞书账号不在允许范围内，系统会拒绝访问。</div></div></section></main>;
   }
 
   return (
     <main className="min-h-screen bg-[#eef3f4] text-[#111827]">
       <div className="min-h-screen lg:grid lg:grid-cols-[248px_1fr]">
         <aside className="border-b border-[#17362f] bg-[#10241f] px-5 py-5 text-white lg:sticky lg:top-0 lg:h-screen lg:border-b-0 lg:border-r">
-          <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-md bg-[#22a88a] text-lg font-semibold">R</span>
-            <div><p className="text-sm font-semibold">Raysense Global</p><p className="text-xs text-[#a9c8bf]">CRM Workspace</p></div>
-          </div>
-          <nav className="mt-6 grid gap-1 text-sm font-medium">
-            {[["客户管理", "当前模块"], ["广告账户", "待扩展"], ["合同资料", "待扩展"], ["数据报表", "待扩展"], ["系统设置", "待扩展"]].map(([label, meta], index) => <button className={`flex items-center justify-between rounded-md px-3 py-2.5 text-left ${index === 0 ? "bg-white text-[#10241f]" : "text-[#d9e8e3] hover:bg-white/10"}`} key={label} type="button"><span>{label}</span><span className={index === 0 ? "text-xs text-[#55708d]" : "text-xs text-[#8ab1a7]"}>{meta}</span></button>)}
-          </nav>
+          <div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-md bg-[#22a88a] text-lg font-semibold">R</span><div><p className="text-sm font-semibold">Raysense Global</p><p className="text-xs text-[#a9c8bf]">CRM Workspace</p></div></div>
+          <nav className="mt-6 grid gap-1 text-sm font-medium">{[["客户管理", "当前模块"], ["广告账户", "待扩展"], ["合同资料", "待扩展"], ["数据报表", "待扩展"], ["系统设置", "待扩展"]].map(([label, meta], index) => <button className={`flex items-center justify-between rounded-md px-3 py-2.5 text-left ${index === 0 ? "bg-white text-[#10241f]" : "text-[#d9e8e3] hover:bg-white/10"}`} key={label} type="button"><span>{label}</span><span className={index === 0 ? "text-xs text-[#55708d]" : "text-xs text-[#8ab1a7]"}>{meta}</span></button>)}</nav>
           <div className="mt-6 rounded-md border border-white/10 bg-white/5 p-3 text-xs leading-5 text-[#c9ddd7]">后续新增功能时，可以直接放进左侧导航，不影响客户录入主流程。</div>
         </aside>
-
         <div className="min-w-0">
-          <header className="sticky top-0 z-30 border-b border-[#dfe3ea] bg-white/95 backdrop-blur">
-            <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-              <div><p className="text-sm font-medium text-[#55708d]">客户管理</p><h1 className="mt-1 text-2xl font-semibold tracking-normal">客户录入与管理后台</h1></div>
-              <div className="flex flex-wrap items-center gap-2 text-sm font-medium"><button className="rounded-md bg-[#176b87] px-4 py-2.5 text-white hover:bg-[#145b73]" onClick={openCreate} type="button">新增客户</button><button className="rounded-md border border-[#d7dce4] bg-white px-3 py-2 text-[#334155]" onClick={() => refresh()} type="button">刷新</button><span className="rounded-md border border-[#d7dce4] bg-white px-3 py-2 text-[#334155]">{session.fullName || session.email}</span><button className="rounded-md bg-[#0d5b4d] px-3 py-2 text-white" onClick={signOut} type="button">退出</button></div>
-            </div>
-          </header>
-
-          <section className="grid gap-5 px-5 py-6">
-            <div className="grid gap-3 md:grid-cols-4">{stats.map(([label, value]) => <div className="rounded-lg border border-[#dfe3ea] bg-white p-4 shadow-sm" key={label}><p className="text-sm text-[#667085]">{label}</p><p className="mt-2 text-2xl font-semibold">{value}</p></div>)}</div>
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-start">
-              <section className="overflow-hidden rounded-lg border border-[#dfe3ea] bg-white shadow-sm">
-                <div className="border-b border-[#e5e7eb] bg-[#fbfcfd] p-5"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><h2 className="text-lg font-semibold">客户管理</h2><p className="mt-1 text-sm text-[#667085]">搜索、筛选、编辑客户，并查看合作与账户资料。</p></div><button className="rounded-md bg-[#176b87] px-4 py-2.5 text-sm font-semibold text-white" onClick={openCreate} type="button">新增客户</button></div><div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(220px,1.6fr)_220px]"><label className="grid gap-1.5 text-sm font-medium">搜索<input className="field" onChange={(event) => setQuery(event.target.value)} placeholder="公司、联系人、电话、邮箱、广告账户" value={query} /></label><label className="grid gap-1.5 text-sm font-medium">状态<select className="field" onChange={(event) => setStatusFilter(event.target.value as CustomerStatus | "全部")} value={statusFilter}><option>全部</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label></div></div>
-                {message ? <div className="m-5 rounded-md border border-[#f2c4c4] bg-[#fff5f5] p-3 text-sm text-[#9f1d1d]">{message}</div> : null}
-                <div className="max-h-[calc(100vh-310px)] overflow-auto"><table className="w-full min-w-[1000px] border-collapse text-left text-sm"><thead className="sticky top-0 z-10 bg-[#f8fafc] text-xs uppercase text-[#64748b]"><tr>{["公司", "联系人", "电话", "地区", "行业", "广告账户", "状态", "负责人", "操作"].map((heading) => <th className="px-4 py-3 font-semibold" key={heading}>{heading}</th>)}</tr></thead><tbody>{filteredCustomers.map((customer) => <tr className={`border-t border-[#edf0f4] transition-colors hover:bg-[#f8fbfc] ${selectedCustomer?.id === customer.id ? "bg-[#eef8fb]" : ""}`} key={customer.id}><td className="px-4 py-3 font-semibold"><button className="text-left hover:text-[#176b87]" onClick={() => setSelectedId(customer.id)} type="button">{customer.company}</button></td><td className="px-4 py-3">{customer.contact}</td><td className="px-4 py-3">{customer.phone || "-"}</td><td className="px-4 py-3">{customer.region || "-"}</td><td className="px-4 py-3">{customer.industry || "-"}</td><td className="px-4 py-3">{customer.adAccounts[0]?.accountId || customer.adAccounts[0]?.accountName || "-"}</td><td className="px-4 py-3"><select className="rounded-md border border-[#d7dce4] bg-white px-2 py-1" disabled={saving} onChange={(event) => handleStatus(customer, event.target.value as CustomerStatus)} value={customer.status}>{statuses.map((status) => <option key={status}>{status}</option>)}</select></td><td className="px-4 py-3">{customer.ownerName || "-"}</td><td className="px-4 py-3"><button className="table-action" onClick={() => openEdit(customer)} type="button">编辑</button></td></tr>)}</tbody></table>{!filteredCustomers.length ? <div className="px-5 py-12 text-center text-sm text-[#667085]">暂无客户数据。</div> : null}</div>
-              </section>
-
-              {selectedCustomer ? <aside className="rounded-lg border border-[#dfe3ea] bg-white p-5 shadow-sm xl:sticky xl:top-24"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-semibold text-[#176b87]">客户详情</p><h2 className="mt-1 text-xl font-semibold">{selectedCustomer.company}</h2><p className="mt-2 text-sm text-[#667085]">{selectedCustomer.notes || "暂无备注"}</p></div><button className="rounded-md border border-[#d7dce4] px-3 py-2 text-sm font-semibold" onClick={() => openEdit(selectedCustomer)} type="button">编辑客户</button></div><dl className="mt-5 grid gap-3 sm:grid-cols-2">{[["联系人", selectedCustomer.contact], ["电话", selectedCustomer.phone || "-"], ["微信", selectedCustomer.wechat || "-"], ["Line/Lark", selectedCustomer.lineLark || "-"], ["邮箱", selectedCustomer.email || "-"], ["TikTok", selectedCustomer.tiktok || "-"], ["合作时间", selectedCustomer.cooperationStart || "-"], ["创建日期", selectedCustomer.createdAt || "-"]].map(([label, value]) => <div className="rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3" key={label}><dt className="text-xs font-semibold text-[#667085]">{label}</dt><dd className="mt-1 break-words text-sm font-medium">{value}</dd></div>)}</dl><div className="mt-4 rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3"><h3 className="text-sm font-semibold">广告账户</h3><div className="mt-3 grid gap-2">{(selectedCustomer.adAccounts.length ? selectedCustomer.adAccounts : [emptyAdAccount()]).map((account, index) => <div className="rounded-md border border-[#edf0f4] bg-white p-3 text-sm" key={index}><p className="font-semibold">{account.accountName || `广告账户 ${index + 1}`}</p><p className="mt-1 text-[#667085]">ID: {account.accountId || "-"} / BC: {account.businessCenterId || "-"} / 返点: {account.rebateRate || "-"}</p><p className="mt-1 text-[#667085]">状态: {account.status}{account.notes ? ` / ${account.notes}` : ""}</p></div>)}</div></div><div className="mt-4 grid gap-3 sm:grid-cols-2">{[["营业执照", selectedCustomer.businessLicenseUrl], ["DBD", selectedCustomer.dbdUrl]].map(([label, url]) => <div className="rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3" key={label}><p className="text-xs font-semibold text-[#667085]">{label}</p>{url ? <a className="mt-1 inline-block text-sm font-semibold text-[#176b87] hover:underline" href={url} rel="noreferrer" target="_blank">查看文件</a> : <p className="mt-1 text-sm">未上传</p>}</div>)}</div></aside> : null}
-            </div>
-          </section>
+          <header className="sticky top-0 z-30 border-b border-[#dfe3ea] bg-white/95 backdrop-blur"><div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="text-sm font-medium text-[#55708d]">客户管理</p><h1 className="mt-1 text-2xl font-semibold tracking-normal">客户录入与管理后台</h1></div><div className="flex flex-wrap items-center gap-2 text-sm font-medium"><button className="rounded-md bg-[#176b87] px-4 py-2.5 text-white hover:bg-[#145b73]" onClick={openCreate} type="button">新增客户</button><button className="rounded-md border border-[#d7dce4] bg-white px-3 py-2 text-[#334155]" onClick={() => refresh()} type="button">刷新</button><span className="rounded-md border border-[#d7dce4] bg-white px-3 py-2 text-[#334155]">{session.fullName || session.email}</span><button className="rounded-md bg-[#0d5b4d] px-3 py-2 text-white" onClick={signOut} type="button">退出</button></div></div></header>
+          <section className="grid gap-5 px-5 py-6"><div className="grid gap-3 md:grid-cols-4">{stats.map(([label, value]) => <div className="rounded-lg border border-[#dfe3ea] bg-white p-4 shadow-sm" key={label}><p className="text-sm text-[#667085]">{label}</p><p className="mt-2 text-2xl font-semibold">{value}</p></div>)}</div><div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-start"><section className="overflow-hidden rounded-lg border border-[#dfe3ea] bg-white shadow-sm"><div className="border-b border-[#e5e7eb] bg-[#fbfcfd] p-5"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><h2 className="text-lg font-semibold">客户管理</h2><p className="mt-1 text-sm text-[#667085]">搜索、筛选、编辑客户，并查看合作与账户资料。</p></div><button className="rounded-md bg-[#176b87] px-4 py-2.5 text-sm font-semibold text-white" onClick={openCreate} type="button">新增客户</button></div><div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(220px,1.6fr)_220px]"><label className="grid gap-1.5 text-sm font-medium">搜索<input className="field" onChange={(event) => setQuery(event.target.value)} placeholder="公司、联系人、电话、邮箱、广告账户" value={query} /></label><label className="grid gap-1.5 text-sm font-medium">状态<select className="field" onChange={(event) => setStatusFilter(event.target.value as CustomerStatus | "全部")} value={statusFilter}><option>全部</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label></div></div>{message ? <div className="m-5 rounded-md border border-[#f2c4c4] bg-[#fff5f5] p-3 text-sm text-[#9f1d1d]">{message}</div> : null}<div className="max-h-[calc(100vh-310px)] overflow-auto"><table className="w-full min-w-[1000px] border-collapse text-left text-sm"><thead className="sticky top-0 z-10 bg-[#f8fafc] text-xs uppercase text-[#64748b]"><tr>{["公司", "联系人", "电话", "地区", "行业", "广告账户", "状态", "负责人", "操作"].map((heading) => <th className="px-4 py-3 font-semibold" key={heading}>{heading}</th>)}</tr></thead><tbody>{filteredCustomers.map((customer) => <tr className={`border-t border-[#edf0f4] transition-colors hover:bg-[#f8fbfc] ${selectedCustomer?.id === customer.id ? "bg-[#eef8fb]" : ""}`} key={customer.id}><td className="px-4 py-3 font-semibold"><button className="text-left hover:text-[#176b87]" onClick={() => setSelectedId(customer.id)} type="button">{customer.company}</button></td><td className="px-4 py-3">{customer.contact}</td><td className="px-4 py-3">{customer.phone || "-"}</td><td className="px-4 py-3">{customer.region || "-"}</td><td className="px-4 py-3">{customer.industry || "-"}</td><td className="px-4 py-3">{customer.adAccounts[0]?.accountId || customer.adAccounts[0]?.accountName || "-"}</td><td className="px-4 py-3"><select className="rounded-md border border-[#d7dce4] bg-white px-2 py-1" disabled={saving} onChange={(event) => handleStatus(customer, event.target.value as CustomerStatus)} value={customer.status}>{statuses.map((status) => <option key={status}>{status}</option>)}</select></td><td className="px-4 py-3">{customer.ownerName || "-"}</td><td className="px-4 py-3"><button className="table-action" onClick={() => openEdit(customer)} type="button">编辑</button></td></tr>)}</tbody></table>{!filteredCustomers.length ? <div className="px-5 py-12 text-center text-sm text-[#667085]">暂无客户数据。</div> : null}</div></section>{selectedCustomer ? <aside className="rounded-lg border border-[#dfe3ea] bg-white p-5 shadow-sm xl:sticky xl:top-24"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-semibold text-[#176b87]">客户详情</p><h2 className="mt-1 text-xl font-semibold">{selectedCustomer.company}</h2><p className="mt-2 text-sm text-[#667085]">{selectedCustomer.notes || "暂无备注"}</p></div><button className="rounded-md border border-[#d7dce4] px-3 py-2 text-sm font-semibold" onClick={() => openEdit(selectedCustomer)} type="button">编辑客户</button></div><dl className="mt-5 grid gap-3 sm:grid-cols-2">{[["联系人", selectedCustomer.contact], ["电话", selectedCustomer.phone || "-"], ["微信", selectedCustomer.wechat || "-"], ["Line/Lark", selectedCustomer.lineLark || "-"], ["邮箱", selectedCustomer.email || "-"], ["TikTok", selectedCustomer.tiktok || "-"], ["合作时间", selectedCustomer.cooperationStart || "-"], ["创建日期", selectedCustomer.createdAt || "-"]].map(([label, value]) => <div className="rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3" key={label}><dt className="text-xs font-semibold text-[#667085]">{label}</dt><dd className="mt-1 break-words text-sm font-medium">{value}</dd></div>)}</dl><div className="mt-4 rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3"><h3 className="text-sm font-semibold">广告账户</h3><div className="mt-3 grid gap-2">{(selectedCustomer.adAccounts.length ? selectedCustomer.adAccounts : [emptyAdAccount()]).map((account, index) => <div className="rounded-md border border-[#edf0f4] bg-white p-3 text-sm" key={index}><p className="font-semibold">{account.accountName || `广告账户 ${index + 1}`}</p><p className="mt-1 text-[#667085]">ID: {account.accountId || "-"} / BC: {account.businessCenterId || "-"} / 返点: {account.rebateRate || "-"}</p><p className="mt-1 text-[#667085]">状态: {account.status}{account.notes ? ` / ${account.notes}` : ""}</p></div>)}</div></div><div className="mt-4 grid gap-3 sm:grid-cols-2">{[["营业执照", selectedCustomer.businessLicenseUrl], ["DBD", selectedCustomer.dbdUrl]].map(([label, url]) => <div className="rounded-md border border-[#edf0f4] bg-[#fbfcfd] p-3" key={label}><p className="text-xs font-semibold text-[#667085]">{label}</p>{url ? <a className="mt-1 inline-block text-sm font-semibold text-[#176b87] hover:underline" href={url} rel="noreferrer" target="_blank">查看文件</a> : <p className="mt-1 text-sm">未上传</p>}</div>)}</div></aside> : null}</div></section>
         </div>
       </div>
 
