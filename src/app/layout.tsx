@@ -2,8 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Daystar CRM",
-  description: "客户录入与管理后台",
+  title: "Raysense Global",
+  description:
+    "Raysense Global provides social commerce operations, advertising support, and CRM reporting tools.",
 };
 
 export default function RootLayout({
