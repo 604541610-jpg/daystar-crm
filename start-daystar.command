@@ -7,4 +7,4 @@ export XDG_CACHE_HOME="/Users/hezhenyang/Documents/Daystar信息录入项目/.pn
 export npm_config_store_dir="/Users/hezhenyang/Documents/Daystar信息录入项目/.pnpm-store"
 export NEXT_TELEMETRY_DISABLED=1
 export WATCHPACK_POLLING=true
-pnpm dev --hostname 127.0.0.1 --port 3000
+pnpm exec next dev --webpack --hostname 127.0.0.1 --port 3000
