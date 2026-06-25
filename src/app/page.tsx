@@ -56,6 +56,9 @@ export default function Home() {
             <a className="hover:text-[#0d5b4d]" href="#company">
               Company
             </a>
+            <a className="hover:text-[#0d5b4d]" href="/crm">
+              CRM Login
+            </a>
             <a className="rounded-md bg-[#0d5b4d] px-4 py-2 text-white hover:bg-[#09483d]" href="mailto:support@raysenseglobal.com">
               Contact
             </a>
