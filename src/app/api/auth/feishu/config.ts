@@ -4,6 +4,7 @@ export type CrmSession = {
   accessToken: string;
   email: string;
   fullName: string;
+  role?: "admin" | "manager" | "staff";
   userId: string;
 };
 
