@@ -112,6 +112,30 @@ create table if not exists public.customer_ad_accounts (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.team_members (
+  id text primary key,
+  email text,
+  full_name text not null,
+  avatar_url text,
+  tenant_key text,
+  role text not null default 'staff' check (role in ('admin', 'manager', 'staff')),
+  status text not null default 'offline' check (status in ('online', 'offline')),
+  last_seen_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.team_members
+  add column if not exists email text,
+  add column if not exists full_name text,
+  add column if not exists avatar_url text,
+  add column if not exists tenant_key text,
+  add column if not exists role text not null default 'staff',
+  add column if not exists status text not null default 'offline',
+  add column if not exists last_seen_at timestamptz,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
+
 insert into public.customer_ad_accounts (
   customer_id,
   account_name,
@@ -165,6 +189,11 @@ create trigger set_customer_ad_accounts_updated_at
 before update on public.customer_ad_accounts
 for each row execute function public.set_updated_at();
 
+drop trigger if exists set_team_members_updated_at on public.team_members;
+create trigger set_team_members_updated_at
+before update on public.team_members
+for each row execute function public.set_updated_at();
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -193,6 +222,7 @@ alter table public.profiles enable row level security;
 alter table public.customers enable row level security;
 alter table public.follow_ups enable row level security;
 alter table public.customer_ad_accounts enable row level security;
+alter table public.team_members enable row level security;
 
 insert into storage.buckets (id, name, public)
 values ('customer-documents', 'customer-documents', true)
@@ -271,6 +301,19 @@ create policy "customer_ad_accounts_delete_authenticated"
 on public.customer_ad_accounts for delete
 to authenticated
 using (true);
+
+drop policy if exists "team_members_select_authenticated" on public.team_members;
+create policy "team_members_select_authenticated"
+on public.team_members for select
+to authenticated
+using (true);
+
+drop policy if exists "team_members_update_admin" on public.team_members;
+create policy "team_members_update_admin"
+on public.team_members for update
+to authenticated
+using (public.is_admin_or_manager())
+with check (public.is_admin_or_manager());
 
 drop policy if exists "follow_ups_select_related_customer" on public.follow_ups;
 create policy "follow_ups_select_related_customer"
