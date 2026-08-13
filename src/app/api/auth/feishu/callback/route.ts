@@ -35,6 +35,8 @@ type UserAccessTokenData = {
   union_id?: string;
 };
 
+type TeamRole = "admin" | "manager" | "staff";
+
 async function feishuPost<T>(
   path: string,
   body: Record<string, string>,
@@ -91,6 +93,85 @@ async function getUserAccessToken(code: string, appAccessToken: string) {
   return data;
 }
 
+function getSupabaseAdminConfig() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
+
+  if (!url || !key) {
+    return null;
+  }
+
+  return { key, url };
+}
+
+function getInitialRole(user: UserAccessTokenData): TeamRole {
+  const adminNames = (process.env.CRM_ADMIN_NAMES || "Jay")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const adminEmails = (process.env.CRM_ADMIN_EMAILS || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const name = user.name || user.en_name || "";
+  const email = user.email?.toLowerCase() || "";
+
+  if (adminNames.includes(name) || (email && adminEmails.includes(email))) {
+    return "admin";
+  }
+
+  return "staff";
+}
+
+async function syncTeamMember(user: UserAccessTokenData) {
+  const config = getSupabaseAdminConfig();
+  const id = user.union_id || user.open_id;
+
+  if (!config || !id) {
+    return getInitialRole(user);
+  }
+
+  const headers = {
+    apikey: config.key,
+    Authorization: `Bearer ${config.key}`,
+    "Content-Type": "application/json",
+  };
+  const existing = await fetch(
+    `${config.url}/rest/v1/team_members?id=eq.${encodeURIComponent(id)}&select=role`,
+    { headers },
+  );
+  let role = getInitialRole(user);
+
+  if (existing.ok) {
+    const rows = (await existing.json()) as { role?: TeamRole }[];
+    role = rows[0]?.role || role;
+  }
+
+  const response = await fetch(`${config.url}/rest/v1/team_members?on_conflict=id`, {
+    body: JSON.stringify({
+      avatar_url: user.avatar_url || null,
+      email: user.email || null,
+      full_name: user.name || user.en_name || user.email || "Feishu User",
+      id,
+      last_seen_at: new Date().toISOString(),
+      role,
+      status: "online",
+      tenant_key: user.tenant_key || null,
+    }),
+    headers: {
+      ...headers,
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    return role;
+  }
+
+  return role;
+}
+
 export async function GET(request: NextRequest) {
   const target = new URL("/crm", getBaseUrl());
 
@@ -110,11 +191,13 @@ export async function GET(request: NextRequest) {
       throw new Error("该飞书账号未被允许访问 CRM。");
     }
 
+    const role = await syncTeamMember(user);
     const session: CrmSession = {
       accessToken: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "",
       email: user.email || `${user.open_id}@feishu.local`,
       fullName: user.name || user.en_name || user.email || "Feishu User",
-      userId: process.env.CRM_SUPABASE_OWNER_ID || user.union_id || user.open_id,
+      role,
+      userId: user.union_id || user.open_id,
     };
     const response = NextResponse.redirect(target);
 
